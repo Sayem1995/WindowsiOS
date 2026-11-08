@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+import Combine
+import Foundation
+import SwiftUI
+import UIKit
+
+enum PostureMode: String, CaseIterable {
+    case auto = "Auto"
+    case laptop = "Laptop"
+    case fullScreen = "Studio"
+
+    var iconName: String {
+        switch self {
+        case .auto: return "sparkles"
+        case .laptop: return "laptopcomputer"
+        case .fullScreen: return "ipad.landscape"
+        }
+    }
+}
+
+enum DeckLayout: String, CaseIterable {
+    case split = "Split"
+    case trackpad = "Trackpad"
+    case keyboard = "Keyboard"
+
+    var iconName: String {
+        switch self {
+        case .split: return "laptopcomputer"
+        case .trackpad: return "rectangle.and.hand.point.up.left"
+        case .keyboard: return "keyboard"
+        }
+    }
+
+    var next: DeckLayout {
+        switch self {
+        case .split: return .trackpad
+        case .trackpad: return .keyboard
+        case .keyboard: return .split
+        }
+    }
+}
+
+@MainActor
+final class VMViewModel: ObservableObject {
+    @Published var isJITLive: Bool = false
+    @Published var isDebuggerAttached: Bool = false
+    @Published var isVMRunning: Bool = false
+    @Published var isUnpacking: Bool = false
+    @Published var unpackProgress: Double = 0
+    @Published var jitStatusText: String = "Checking JIT..."
+    @Published var vmStatusText: String = "Initializing..."
+    @Published var fbWidth: UInt32 = 0
+    @Published var fbHeight: UInt32 = 0
+    @Published var presentedFrames: UInt64 = 0
+    @Published var availableMemoryMB: UInt64 = 0
+
+    @Published var usbKeyboardReady: Bool = false
+    @Published var usbTabletReady: Bool = false
+    @Published var usbEventsDelivered: UInt64 = 0
+
+    // iOS 27.1 UIHinge state (0 = unknown, 1 = closed, 2 = partiallyOpen, 3 = fullyOpen)
+    @Published var hingeStatusRaw: Int = 0
+    @Published var hingeAngleDegrees: Double? = nil
+
+    @Published var postureMode: PostureMode = .auto
+    @Published var deckLayout: DeckLayout = .split
+    @Published var controlBarVisible: Bool = true
+    @Published var trackpadMode: Bool = false
+    @Published var rightClickArmed: Bool = false
+    @Published var systemKeyboardVisible: Bool = false
+
+    private var didAutoLaunchAttempt = false
+
+    init() {
+        let bridge = WinIOSBridge.shared
+        bridge.installTrapGuard()
+        bridge.onStateChanged = { [weak self] in
+            Task { @MainActor in
+                self?.syncFromBridge()
+            }
+        }
+        syncFromBridge()
+        Task { @MainActor [weak self] in
+            self?.onAppBecameActive()
+        }
+    }
+
+    func isLaptopLayoutActive(for size: CGSize) -> Bool {
+        switch postureMode {
+        case .laptop:
+            return true
+        case .fullScreen:
+            return false
+        case .auto:
+            // Hardware hinge folded into laptop posture (partiallyOpen == 2, or live hinge angle 30°..166°)
+            if hingeStatusRaw == 2 {
+                return true
+            }
+            if let deg = hingeAngleDegrees {
+                return deg >= 30.0 && deg <= 166.0
+            }
+            // Fallback when UIHinge hasn't reported yet: portrait inner screen defaults to Laptop
+            let isUnfoldedInner = max(size.width, size.height) > 780 && min(size.width, size.height) > 580
+            if hingeStatusRaw == 0 && isUnfoldedInner && size.height > size.width {
+                return true
+            }
+            return false
+        }
+    }
+
+    func updateHinge(statusRaw: Int, angleDegrees: Double?, viewportSize: CGSize) {
+        let wasPartiallyOpen = (hingeStatusRaw == 2)
+        hingeStatusRaw = statusRaw
+        hingeAngleDegrees = angleDegrees
+        if postureMode == .auto && statusRaw == 2 && !wasPartiallyOpen {
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+            SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
+        }
+    }
+
+    func cyclePostureMode(viewportSize: CGSize) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        switch postureMode {
+        case .auto:
+            postureMode = .laptop
+            SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
+        case .laptop:
+            postureMode = .fullScreen
+        case .fullScreen:
+            postureMode = .auto
+        }
+    }
+
+    func launchGuestEdgeBrowser() {
+        // Win+R -> "msedge" -> Enter
+        WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x15)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            let msedgeHids: [UInt8] = [0x10, 0x16, 0x08, 0x07, 0x0a, 0x08, 0x28] // m s e d g e Enter
+            for (idx, code) in msedgeHids.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(idx) * 0.045) {
+                    WinIOSBridge.shared.tapKeyHid(code)
+                }
+            }
+        }
+    }
+
+    func syncFromBridge() {
+        let b = WinIOSBridge.shared
+        isJITLive = b.isJITLive
+        isDebuggerAttached = b.isDebuggerAttached
+        isVMRunning = b.isVMRunning
+        isUnpacking = b.isUnpacking
+        unpackProgress = b.unpackProgress
+        jitStatusText = b.jitStatusText
+        vmStatusText = b.vmStatusText
+        fbWidth = b.framebufferWidth
+        fbHeight = b.framebufferHeight
+        presentedFrames = b.presentedFrames
+        availableMemoryMB = b.availableMemoryMB
+        usbKeyboardReady = b.usbKeyboardReady
+        usbTabletReady = b.usbTabletReady
+        usbEventsDelivered = b.usbEventsDelivered
+    }
+
+    func onAppBecameActive() {
+        let b = WinIOSBridge.shared
+        if !b.isJITLive && b.isDebuggerAttached {
+            _ = b.tryAcquireJIT(true)
+        }
+        syncFromBridge()
+        if b.isJITLive && !b.isVMRunning && !b.isUnpacking && b.hasProvisionedMachine() && !didAutoLaunchAttempt {
+            didAutoLaunchAttempt = true
+            b.prepareAndStart(with: nil)
+            syncFromBridge()
+        }
+    }
+
+    func startOrRetry() {
+        didAutoLaunchAttempt = true
+        WinIOSBridge.shared.prepareAndStart(with: nil)
+        syncFromBridge()
+    }
+
+    func requestStikDebugJIT() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        var urlStr = "stikjit://enable-jit?bundle-id=\(bundleID)&pid=\(getpid())"
+        if let scriptPath = Bundle.main.path(forResource: "henge-jit", ofType: "js"),
+           let script = try? String(contentsOfFile: scriptPath, encoding: .utf8),
+           let data = script.data(using: .utf8) {
+            let b64 = data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+            if let encoded = b64.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                urlStr += "&script-data=\(encoded)"
+            }
+        }
+        if let url = URL(string: urlStr) {
+            UIApplication.shared.open(url, options: [:], completionHandler: nil)
+        }
+    }
+}

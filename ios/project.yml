@@ -1,0 +1,90 @@
+name: WindowsiOS
+options:
+  bundleIdPrefix: me.ammaar
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 7S264298H8
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Development"
+    PROVISIONING_PROFILE_SPECIFIER: "WindowsiOS Duo Dev"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  WindowsiOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+        excludes:
+          - "Info.plist"
+          - "Resources/**"
+      - path: Sources/Resources/henge-jit.js
+        buildPhase: resources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Windows 11
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIStatusBarHidden: true
+        UIViewControllerBasedStatusBarAppearance: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+    entitlements:
+      path: WindowsiOS.entitlements
+      properties:
+        get-task-allow: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: me.ammaar.windowsios
+        PRODUCT_NAME: WindowsiOS
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development: Ammaar Reshi (6U8W89GC8D)"
+        PROVISIONING_PROFILE_SPECIFIER: "WindowsiOS Duo Dev"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_OBJC_BRIDGING_HEADER: $(PROJECT_DIR)/Sources/Native/WindowsiOS-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/../core
+          - $(PROJECT_DIR)/../host
+          - $(PROJECT_DIR)/../devices
+          - $(PROJECT_DIR)/deps/include
+          - $(PROJECT_DIR)/Sources/Native
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(PROJECT_DIR)/../build/ios
+          - $(PROJECT_DIR)/deps/lib
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lwinvm
+          - -lslirp
+          - -lglib-2.0
+          - -lintl
+          - -lpcre2-8
+          - -lffi
+          - -lresolv
+          - -liconv
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreGraphics.framework
+      - sdk: ImageIO.framework
+      - sdk: UniformTypeIdentifiers.framework

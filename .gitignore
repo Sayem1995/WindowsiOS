@@ -1,0 +1,12 @@
+build/
+work/
+ios/deps/
+ios/*.xcodeproj
+ios/DerivedData/
+*.ipa
+*.app
+*.o
+*.a
+__pycache__/
+*.pyc
+.DS_Store
