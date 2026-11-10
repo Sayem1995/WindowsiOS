@@ -2,6 +2,7 @@
 #import "winios_bridge.h"
 
 #include "hvsparse.h"
+#include "share.h"
 #include "winios_jit.h"
 #include "winvm.h"
 
@@ -83,6 +84,9 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _screenScale = 3.0;
         _hingeStatus = 0;
         _hingeAngleDegrees = -1.0;
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        BOOL safariDefault = ([ud objectForKey:@"winios.safariOAuth"] == nil) ? YES : [ud boolForKey:@"winios.safariOAuth"];
+        hv_share_set_url_handler_enabled(safariDefault ? 1 : 0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
         _diagQueue = dispatch_queue_create("me.ammaar.windowsios.diag", attr);
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
@@ -646,6 +650,27 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)stopVM {
     if (!_vmRunning) return;
     hv_winvm_stop();
+}
+
+- (BOOL)useSafariForGuestLinks {
+    return hv_share_url_handler_enabled() != 0;
+}
+
+- (void)setUseSafariForGuestLinks:(BOOL)useSafariForGuestLinks {
+    hv_share_set_url_handler_enabled(useSafariForGuestLinks ? 1 : 0);
+    [[NSUserDefaults standardUserDefaults] setBool:useSafariForGuestLinks forKey:@"winios.safariOAuth"];
+}
+
+- (nullable NSString *)takeGuestOpenURL {
+    char *raw = hv_share_take_open_url();
+    if (!raw) return nil;
+    NSString *s = [NSString stringWithUTF8String:raw];
+    free(raw);
+    return s;
+}
+
+- (BOOL)takeGuestOAuthDone {
+    return hv_share_take_oauth_done() != 0;
 }
 
 @end

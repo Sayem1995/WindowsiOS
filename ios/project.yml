@@ -86,6 +86,7 @@ targets:
           - -liconv
     dependencies:
       - sdk: AVFoundation.framework
+      - sdk: SafariServices.framework
       - sdk: Metal.framework
       - sdk: QuartzCore.framework
       - sdk: AudioToolbox.framework

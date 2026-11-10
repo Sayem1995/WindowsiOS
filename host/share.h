@@ -16,4 +16,12 @@ char *hv_share_take_clipboard(void);
 /* Seconds since the helper in macOS was last heard from, or -1 if it never has been. */
 long hv_share_agent_seen(void);
 
+/* Enable/disable host SafariSheet handling of guest `/.henge/open-url` requests (0 -> guest falls back to Edge). */
+void hv_share_set_url_handler_enabled(int enabled);
+int hv_share_url_handler_enabled(void);
+/* URL the guest asked the host browser to open (e.g. Google OAuth sign-in), once: malloc'd or NULL. */
+char *hv_share_take_open_url(void);
+/* Returns 1 (once) when the guest OAuth callback relay completed an auth redirect. */
+int hv_share_take_oauth_done(void);
+
 #endif

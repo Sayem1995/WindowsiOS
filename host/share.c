@@ -9,6 +9,7 @@
 
    Locks are accepted but not enforced: macOS only writes to a server that offers them, and there is one client. */
 #include "share.h"
+#include "net_slirp.h"
 
 #include <copyfile.h>
 #include <dirent.h>
@@ -44,7 +45,45 @@ static pthread_cond_t clip_cond = PTHREAD_COND_INITIALIZER;
 static char *device_clip; /* the device's, for the guest */
 static unsigned long device_seq;
 static char *guest_clip; /* the guest's, until the device takes it */
+static char *guest_open_url;
+static int guest_oauth_done;
+static int url_handler_enabled = -1;
 static time_t agent_seen;
+
+static int is_url_handler_on(void) {
+    if (url_handler_enabled < 0)
+        url_handler_enabled = getenv("HV_OAUTH_BRIDGE") != NULL ? 1 : 0;
+    return url_handler_enabled;
+}
+
+void hv_share_set_url_handler_enabled(int enabled) {
+    pthread_mutex_lock(&clip_mu);
+    url_handler_enabled = enabled ? 1 : 0;
+    pthread_mutex_unlock(&clip_mu);
+}
+
+int hv_share_url_handler_enabled(void) {
+    pthread_mutex_lock(&clip_mu);
+    int v = is_url_handler_on();
+    pthread_mutex_unlock(&clip_mu);
+    return v;
+}
+
+char *hv_share_take_open_url(void) {
+    pthread_mutex_lock(&clip_mu);
+    char *url = guest_open_url;
+    guest_open_url = NULL;
+    pthread_mutex_unlock(&clip_mu);
+    return url;
+}
+
+int hv_share_take_oauth_done(void) {
+    pthread_mutex_lock(&clip_mu);
+    int done = guest_oauth_done;
+    guest_oauth_done = 0;
+    pthread_mutex_unlock(&clip_mu);
+    return done;
+}
 
 void hv_share_set_clipboard(const char *text) {
     pthread_mutex_lock(&clip_mu);
@@ -656,6 +695,42 @@ static int clipboard_put(Conn *c, Request *r) {
     return respond_empty(c, r, 204, "No Content");
 }
 
+static void auto_forward_localhost_ports(const char *url) {
+    static const char *keys[] = {"localhost:", "localhost%3A", "localhost%3a", "127.0.0.1:", "127.0.0.1%3A", "127.0.0.1%3a"};
+    for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
+        const char *p = url;
+        size_t klen = strlen(keys[k]);
+        while ((p = strcasestr(p, keys[k])) != NULL) {
+            p += klen;
+            int port = atoi(p);
+            if (port >= 1024 && port <= 65535) hv_net_add_hostfwd(port, port);
+        }
+    }
+}
+
+static int open_url_put(Conn *c, Request *r) {
+    size_t len = 0;
+    char *url = body_small(c, r, &len);
+    if (!url) return -1;
+    while (len > 0 && (url[len - 1] == '\n' || url[len - 1] == '\r' || url[len - 1] == ' ')) url[--len] = 0;
+    if (strncasecmp(url, "http://", 7) == 0 || strncasecmp(url, "https://", 8) == 0) {
+        auto_forward_localhost_ports(url);
+        pthread_mutex_lock(&clip_mu);
+        if (!is_url_handler_on()) {
+            pthread_mutex_unlock(&clip_mu);
+            free(url);
+            return respond_empty(c, r, 409, "Conflict");
+        }
+        free(guest_open_url);
+        guest_open_url = url;
+        agent_seen = time(NULL);
+        pthread_mutex_unlock(&clip_mu);
+        return respond_empty(c, r, 204, "No Content");
+    }
+    free(url);
+    return respond_empty(c, r, 400, "Bad Request");
+}
+
 static int serve_henge(Conn *c, Request *r) {
     const char *what = r->path + strlen("/.henge/");
     if (!strcmp(what, "install") && !strcmp(r->method, "GET")) {
@@ -665,6 +740,27 @@ static int serve_henge(Conn *c, Request *r) {
     if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "PUT")) return clipboard_put(c, r);
+    if (!strcmp(what, "open-url") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) return open_url_put(c, r);
+    if (!strcmp(what, "oauth-done") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) {
+        if (body_discard(c, r) != 0) return -1;
+        pthread_mutex_lock(&clip_mu);
+        guest_oauth_done = 1;
+        agent_seen = time(NULL);
+        pthread_mutex_unlock(&clip_mu);
+        return respond_empty(c, r, 204, "No Content");
+    }
+    if (!strcmp(what, "expose-port") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) {
+        size_t len = 0;
+        char *pstr = body_small(c, r, &len);
+        if (!pstr) return -1;
+        int port = atoi(pstr);
+        free(pstr);
+        if (port >= 1024 && port <= 65535) {
+            hv_net_add_hostfwd(port, port);
+            return respond_empty(c, r, 204, "No Content");
+        }
+        return respond_empty(c, r, 400, "Bad Request");
+    }
     if (body_discard(c, r) != 0) return -1;
     return respond_empty(c, r, 404, "Not Found");
 }

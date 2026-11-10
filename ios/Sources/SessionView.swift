@@ -43,6 +43,11 @@ struct SessionView: View {
             .onChange(of: size) { _, newSize in
                 WinIOSBridge.shared.updateScreenSize(newSize, scale: UIScreen.main.scale)
             }
+            .sheet(item: $vm.activeSafariURL) { item in
+                SafariSheet(url: item.url)
+                    .ignoresSafeArea()
+                    .preferredColorScheme(.dark)
+            }
         }
         .ignoresSafeArea()
         .statusBarHidden(true)
@@ -456,6 +461,14 @@ struct SessionView: View {
 
                 studioPillItem(icon: "globe", label: "Edge") {
                     vm.launchGuestEdgeBrowser()
+                }
+
+                studioPillItem(
+                    icon: vm.useSafariForOAuth ? "safari" : "network",
+                    label: vm.useSafariForOAuth ? "OAuth: Safari" : "OAuth: Edge",
+                    active: vm.useSafariForOAuth
+                ) {
+                    vm.toggleOAuthBrowserMode()
                 }
 
                 studioPillItem(icon: "keyboard", label: "Keys", active: vm.systemKeyboardVisible) {

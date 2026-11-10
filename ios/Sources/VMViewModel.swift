@@ -1,8 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Combine
 import Foundation
+import SafariServices
 import SwiftUI
 import UIKit
+
+struct IdentifiableURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct SafariSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let vc = SFSafariViewController(url: url)
+        vc.preferredBarTintColor = UIColor(red: 0.045, green: 0.058, blue: 0.096, alpha: 1.0)
+        vc.preferredControlTintColor = UIColor(red: 0.82, green: 0.90, blue: 1.0, alpha: 1.0)
+        vc.dismissButtonStyle = .done
+        return vc
+    }
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+}
 
 enum PostureMode: String, CaseIterable {
     case auto = "Auto"
@@ -68,8 +86,11 @@ final class VMViewModel: ObservableObject {
     @Published var trackpadMode: Bool = false
     @Published var rightClickArmed: Bool = false
     @Published var systemKeyboardVisible: Bool = false
+    @Published var activeSafariURL: IdentifiableURL? = nil
+    @Published var useSafariForOAuth: Bool = WinIOSBridge.shared.useSafariForGuestLinks
 
     private var didAutoLaunchAttempt = false
+    private var oauthPollTimer: Timer? = nil
 
     init() {
         let bridge = WinIOSBridge.shared
@@ -80,9 +101,36 @@ final class VMViewModel: ObservableObject {
             }
         }
         syncFromBridge()
+        startOAuthPoller()
         Task { @MainActor [weak self] in
             self?.onAppBecameActive()
         }
+    }
+
+    private func startOAuthPoller() {
+        oauthPollTimer?.invalidate()
+        oauthPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let b = WinIOSBridge.shared
+                if b.takeGuestOAuthDone() {
+                    if self.activeSafariURL != nil {
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        self.activeSafariURL = nil
+                    }
+                }
+                if let urlStr = b.takeGuestOpenURL(), let u = URL(string: urlStr) {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    self.activeSafariURL = IdentifiableURL(url: u)
+                }
+            }
+        }
+    }
+
+    func toggleOAuthBrowserMode() {
+        useSafariForOAuth.toggle()
+        WinIOSBridge.shared.useSafariForGuestLinks = useSafariForOAuth
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     func isLaptopLayoutActive(for size: CGSize) -> Bool {

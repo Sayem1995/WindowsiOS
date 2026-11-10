@@ -18,6 +18,7 @@
 
 #include "winvm.h"
 #include "mmu.h"
+#include "share.h"
 
 /* macOS virtual key codes (kVK_*) -> Linux EV_KEY codes (mapped to USB HID by hv_winvm_key_linux) */
 static const uint16_t kMacToLinuxKey[128] = {
@@ -192,6 +193,14 @@ static void *cmd_file_thread(void *arg) {
                 }
             }
             fflush(stderr);
+        } else if (sscanf(line, "oauthmode %d", &code) == 1) {
+            hv_share_set_url_handler_enabled(code);
+            fprintf(stderr, "winvm: oauthmode=%d\n", code);
+        } else if (!strcmp(line, "oauthstatus")) {
+            char *u = hv_share_take_open_url();
+            int done = hv_share_take_oauth_done();
+            fprintf(stderr, "OAUTH_STATUS url=%s done=%d\n", u ? u : "(none)", done);
+            free(u);
         } else if (sscanf(line, "wait %d", &code) == 1 && code > 0) {
             usleep((useconds_t)code * 1000u);
         } else if (!strcmp(line, "quit")) {

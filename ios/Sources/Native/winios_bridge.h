@@ -25,7 +25,11 @@ typedef void (^WinIOSStateCallback)(void);
 @property (nonatomic, readonly) BOOL usbKeyboardReady;
 @property (nonatomic, readonly) BOOL usbTabletReady;
 @property (nonatomic, readonly) uint64_t usbEventsDelivered;
+@property (nonatomic, assign) BOOL useSafariForGuestLinks;
 @property (nonatomic, copy, nullable) WinIOSStateCallback onStateChanged;
+
+- (nullable NSString *)takeGuestOpenURL;
+- (BOOL)takeGuestOAuthDone;
 
 - (void)installTrapGuard;
 - (BOOL)tryAcquireJIT:(BOOL)detachAfter;

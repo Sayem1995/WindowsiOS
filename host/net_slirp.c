@@ -11,13 +11,16 @@
 #include "share.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <libslirp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -55,6 +58,121 @@ static int npfd;
 uint64_t hv_net_tx_frames, hv_net_rx_frames;
 
 static char share_socket[256];
+
+typedef struct FwdReq {
+    int host_port, guest_port;
+} FwdReq;
+static pthread_mutex_t fwd_mu = PTHREAD_MUTEX_INITIALIZER;
+static FwdReq pending_fwds[32];
+static int npending_fwds;
+static int active_fwds[64];
+static int nactive_fwds;
+
+typedef struct V6ConnPair {
+    int a, b;
+} V6ConnPair;
+
+static void *v6_pump_thread(void *arg) {
+    V6ConnPair p = *(V6ConnPair *)arg;
+    free(arg);
+    uint8_t buf[16384];
+    struct pollfd fds[2] = {{p.a, POLLIN, 0}, {p.b, POLLIN, 0}};
+    while (poll(fds, 2, 120000) > 0) {
+        for (int i = 0; i < 2; i++) {
+            int src = i == 0 ? p.a : p.b;
+            int dst = i == 0 ? p.b : p.a;
+            if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                ssize_t n = recv(src, buf, sizeof buf, 0);
+                if (n <= 0) goto done;
+                size_t off = 0;
+                while (off < (size_t)n) {
+                    ssize_t w = send(dst, buf + off, (size_t)n - off, 0);
+                    if (w <= 0) goto done;
+                    off += (size_t)w;
+                }
+            }
+        }
+    }
+done:
+    close(p.a);
+    close(p.b);
+    return NULL;
+}
+
+typedef struct V6AcceptArg {
+    int listen_fd;
+    int port;
+} V6AcceptArg;
+
+static void *v6_accept_thread(void *arg) {
+    V6AcceptArg a = *(V6AcceptArg *)arg;
+    free(arg);
+    for (;;) {
+        int cfd = accept(a.listen_fd, NULL, NULL);
+        if (cfd < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        int v4 = socket(AF_INET, SOCK_STREAM, 0);
+        if (v4 < 0) { close(cfd); continue; }
+        struct sockaddr_in dst = {0};
+        dst.sin_family = AF_INET;
+        dst.sin_port = htons((uint16_t)a.port);
+        inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+        if (connect(v4, (struct sockaddr *)&dst, sizeof dst) != 0) {
+            close(cfd);
+            close(v4);
+            continue;
+        }
+        V6ConnPair *pair = malloc(sizeof *pair);
+        if (!pair) { close(cfd); close(v4); continue; }
+        pair->a = cfd;
+        pair->b = v4;
+        pthread_t pt;
+        if (pthread_create(&pt, NULL, v6_pump_thread, pair) == 0) pthread_detach(pt);
+        else { free(pair); close(cfd); close(v4); }
+    }
+    close(a.listen_fd);
+    return NULL;
+}
+
+static void start_ipv6_loopback_bridge(int port) {
+    int lfd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (lfd < 0) return;
+    int one = 1;
+    setsockopt(lfd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in6 addr = {0};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons((uint16_t)port);
+    addr.sin6_addr = in6addr_loopback;
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(lfd, 16) != 0) {
+        close(lfd);
+        return;
+    }
+    V6AcceptArg *a = malloc(sizeof *a);
+    if (!a) { close(lfd); return; }
+    a->listen_fd = lfd;
+    a->port = port;
+    pthread_t t;
+    if (pthread_create(&t, NULL, v6_accept_thread, a) == 0) pthread_detach(t);
+    else { free(a); close(lfd); }
+}
+
+void hv_net_add_hostfwd(int host_port, int guest_port) {
+    if (host_port < 1024 || host_port > 65535 || guest_port < 1 || guest_port > 65535) return;
+    pthread_mutex_lock(&fwd_mu);
+    int dup = 0;
+    for (int i = 0; i < npending_fwds; i++)
+        if (pending_fwds[i].host_port == host_port) dup = 1;
+    if (!dup && npending_fwds < 32)
+        pending_fwds[npending_fwds++] = (FwdReq){host_port, guest_port};
+    pthread_mutex_unlock(&fwd_mu);
+    if (wake_pipe[1] > 0) {
+        char c = 0;
+        (void)!write(wake_pipe[1], &c, 1);
+    }
+}
 
 void hv_net_set_share_socket(const char *path) {
     snprintf(share_socket, sizeof share_socket, "%s", path ? path : "");
@@ -211,6 +329,26 @@ static void *net_thread(void *unused) {
         if (pfds[0].revents & POLLIN) {
             char buf[64];
             while (read(wake_pipe[0], buf, sizeof buf) > 0) {}
+        }
+        for (;;) {
+            FwdReq req = {0, 0};
+            pthread_mutex_lock(&fwd_mu);
+            if (npending_fwds > 0) req = pending_fwds[--npending_fwds];
+            pthread_mutex_unlock(&fwd_mu);
+            if (!req.host_port) break;
+            int exists = 0;
+            for (int i = 0; i < nactive_fwds; i++)
+                if (active_fwds[i] == req.host_port) exists = 1;
+            if (!exists) {
+                struct in_addr h, g;
+                inet_pton(AF_INET, "127.0.0.1", &h);
+                inet_pton(AF_INET, "10.0.2.15", &g);
+                if (slirp_add_hostfwd(slirp, 0, h, req.host_port, g, req.guest_port) == 0) {
+                    if (nactive_fwds < 64) active_fwds[nactive_fwds++] = req.host_port;
+                    start_ipv6_loopback_bridge(req.host_port);
+                    fprintf(stderr, "winvm: net: forwarded [::1]/127.0.0.1:%d -> 10.0.2.15:%d\n", req.host_port, req.guest_port);
+                }
+            }
         }
         slirp_pollfds_poll(slirp, r < 0, get_revents, NULL);
         now = now_ms();
