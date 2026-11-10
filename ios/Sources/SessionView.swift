@@ -350,6 +350,10 @@ struct SessionView: View {
                     SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
                 }
 
+                studioQuickTile(title: "Antigravity", icon: "sparkles") {
+                    vm.launchGuestAntigravity()
+                }
+
                 studioQuickTile(title: "Edge Web", icon: "globe") {
                     vm.launchGuestEdgeBrowser()
                 }
@@ -444,6 +448,10 @@ struct SessionView: View {
                         vm.systemKeyboardVisible = false
                     }
                     SceneOrientationController.alignForLaptopPostureIfLandscape(size: viewportSize)
+                }
+
+                studioPillItem(icon: "sparkles", label: "Antigravity") {
+                    vm.launchGuestAntigravity()
                 }
 
                 studioPillItem(icon: "globe", label: "Edge") {

@@ -96,6 +96,7 @@ static uint64_t tick_locked(HvMachine *m, HvCpu *cpu) {
     hv_pl031_tick(b->rtc);
     if (b->poll) b->poll();
     hv_xhci_poll(b->usb);
+    if (b->hda) hv_hda_poll(b->hda);
     if (b->snd) hv_virtio_snd_poll(b->snd);
     return deadline;
 }
@@ -205,8 +206,9 @@ int hv_winvirt_create(HvWinVirt *b, HvMachine *m, HvCpu *cpu, int ncpus, uint64_
     b->net = hv_virtio_net_create(m, b->pcie, mac ? mac : default_mac);
     if (disk0) b->nvme0 = hv_nvme_create(m, b->pcie, disk0, "WIN11IOS01");
     b->usb = hv_xhci_create(m, b->pcie);
+    b->hda = hv_hda_create(m, b->pcie);
     if (disk1) b->nvme1 = hv_nvme_create(m, b->pcie, disk1, "WIN11INST");
-    if (enable_sound) b->snd = hv_virtio_snd_create(m, b->pcie);
+    (void)enable_sound;
 
     m->tick = tick;
     m->tick_opaque = b;

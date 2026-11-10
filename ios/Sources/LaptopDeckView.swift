@@ -231,6 +231,7 @@ private enum FunctionAction: Equatable {
     case search
     case explorer
     case edgeBrowser
+    case antigravityApp
     case taskManager
     case altTab
     case showDesktop
@@ -316,7 +317,7 @@ struct LaptopDeckView: View {
         .fnKey("f2",    action: .search,          fnHid: 0x3b, fnTag: "F2", symbol: "magnifyingglass"),
         .fnKey("f3",    action: .explorer,        fnHid: 0x3c, fnTag: "F3", symbol: "folder"),
         .fnKey("f4",    action: .edgeBrowser,     fnHid: 0x3d, fnTag: "F4", symbol: "globe"),
-        .fnKey("f5",    action: .taskManager,     fnHid: 0x3e, fnTag: "F5", symbol: "Waveform.path.ecg".lowercased()),
+        .fnKey("f5",    action: .antigravityApp,  fnHid: 0x3e, fnTag: "F5", symbol: "sparkles"),
         .fnKey("f6",    action: .altTab,          fnHid: 0x3f, fnTag: "F6", symbol: "rectangle.on.rectangle"),
         .fnKey("f7",    action: .showDesktop,     fnHid: 0x40, fnTag: "F7", symbol: "menubar.rectangle"),
         .fnKey("f8",    action: .rightClickArm,   fnHid: 0x41, fnTag: "F8", symbol: "computermouse"),
@@ -769,6 +770,8 @@ struct LaptopDeckView: View {
             WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe3)], key: 0x08) // Win+E
         case .edgeBrowser:
             vm.launchGuestEdgeBrowser()
+        case .antigravityApp:
+            vm.launchGuestAntigravity()
         case .taskManager:
             WinIOSBridge.shared.sendKeyCombo(withModifiers: [NSNumber(value: 0xe0), NSNumber(value: 0xe1)], key: 0x29)
         case .altTab:

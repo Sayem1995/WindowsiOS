@@ -196,9 +196,7 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
         if (hv_net_attach(&m, board.net) == 0) net_on = 1;
         else fprintf(stderr, "winvm: user-mode SLIRP networking unavailable\n");
     }
-#if !TARGET_OS_IPHONE
-    if (board.snd && c->enable_sound) hv_audio_attach(board.snd);
-#endif
+    if (board.hda && c->enable_sound) hv_audio_attach_hda(board.hda);
     board.poll = board_poll;
 
     os_unfair_lock_lock(&display_lock);
@@ -333,6 +331,7 @@ void hv_winvm_start(int spawn_cpu0, void (*on_exit)(int reason)) {
 
 void hv_winvm_stop(void) {
     atomic_store(&stop_requested, 1);
+    hv_audio_shutdown();
     for (int i = 0; i < ncpus; i++) cpus[i].halted = 3;
     hv_machine_kick_all(&m);
     for (int i = 0; i < ncpus; i++) hv_cpu_wake(&cpus[i]);

@@ -1,25 +1,229 @@
-/* The guest's sound on the host (Mac or iOS): the default output device through an AudioUnit
-   whose render callback pulls PCM straight from the virtio-snd ring. The unit
-   is set to the stream's own format, and CoreAudio converts to the device. */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Full-duplex host audio backend for macOS and iOS:
+ *   - Playback (Speaker Out): low-latency RemoteIO (iOS) / DefaultOutput (macOS) AudioUnit
+ *     pulling S16LE frames straight from HvHda's lock-free TX ring.
+ *   - Capture (Microphone In): CoreAudio AudioQueueInput with automatic hardware sample-rate
+ *     and mono-to-stereo conversion into HvHda's lock-free RX ring. */
 #include "audio_mac.h"
 
 #include <AudioToolbox/AudioToolbox.h>
 #include <TargetConditionals.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
 
-/* The Mac's default output device, or the iOS app's own output (the app sets its audio session to playback). */
 #if TARGET_OS_IPHONE
 #define HV_OUTPUT_UNIT kAudioUnitSubType_RemoteIO
 #else
 #define HV_OUTPUT_UNIT kAudioUnitSubType_DefaultOutput
 #endif
-#include <stdio.h>
 
-static AudioComponentInstance unit;
-static int unit_running;
-static unsigned cur_channels, cur_format, cur_rate;
+#define IN_NUM_BUFFERS 4
+#define IN_BUFFER_FRAMES 960 /* 20 ms @ 48 kHz */
 
-static OSStatus render(void *ref, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts, UInt32 bus,
-                       UInt32 frames, AudioBufferList *io) {
+static pthread_mutex_t audio_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* ---- HDA Playback (Output AudioUnit) ---- */
+static AudioComponentInstance hda_out_unit;
+static int hda_out_running;
+static unsigned hda_out_ch, hda_out_rate;
+
+static OSStatus hda_out_render(void *ref, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts,
+                               UInt32 bus, UInt32 frames, AudioBufferList *io) {
+    (void)flags, (void)ts, (void)bus, (void)frames;
+    HvHda *hda = (HvHda *)ref;
+    for (UInt32 i = 0; i < io->mNumberBuffers; i++)
+        hv_hda_pull_playback(hda, io->mBuffers[i].mData, io->mBuffers[i].mDataByteSize);
+    return noErr;
+}
+
+static int hda_start_out(void *opaque, unsigned channels, unsigned rate_hz) {
+    HvHda *hda = (HvHda *)opaque;
+    if (channels < 1 || channels > 2) channels = 2;
+    if (rate_hz < 8000 || rate_hz > 192000) rate_hz = 48000;
+
+    pthread_mutex_lock(&audio_mu);
+    if (hda_out_unit && (channels != hda_out_ch || rate_hz != hda_out_rate)) {
+        AudioOutputUnitStop(hda_out_unit);
+        AudioUnitUninitialize(hda_out_unit);
+        AudioComponentInstanceDispose(hda_out_unit);
+        hda_out_unit = NULL;
+        hda_out_running = 0;
+    }
+    if (!hda_out_unit) {
+        AudioComponentDescription desc = {
+            .componentType = kAudioUnitType_Output,
+            .componentSubType = HV_OUTPUT_UNIT,
+            .componentManufacturer = kAudioUnitManufacturer_Apple,
+        };
+        AudioComponent comp = AudioComponentFindNext(NULL, &desc);
+        if (!comp || AudioComponentInstanceNew(comp, &hda_out_unit) != noErr) {
+            pthread_mutex_unlock(&audio_mu);
+            return -1;
+        }
+        AudioStreamBasicDescription f = {0};
+        f.mSampleRate = (Float64)rate_hz;
+        f.mFormatID = kAudioFormatLinearPCM;
+        f.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+        f.mBytesPerPacket = f.mBytesPerFrame = 2u * channels;
+        f.mFramesPerPacket = 1;
+        f.mChannelsPerFrame = channels;
+        f.mBitsPerChannel = 16;
+
+        AURenderCallbackStruct cb = {hda_out_render, hda};
+        if (AudioUnitSetProperty(hda_out_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f) != noErr ||
+            AudioUnitSetProperty(hda_out_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) != noErr ||
+            AudioUnitInitialize(hda_out_unit) != noErr) {
+            fprintf(stderr, "winvm: audio: output unit refused %u ch @ %u Hz\n", channels, rate_hz);
+            AudioComponentInstanceDispose(hda_out_unit);
+            hda_out_unit = NULL;
+            pthread_mutex_unlock(&audio_mu);
+            return -1;
+        }
+        hda_out_ch = channels;
+        hda_out_rate = rate_hz;
+    }
+    if (!hda_out_running && AudioOutputUnitStart(hda_out_unit) == noErr)
+        hda_out_running = 1;
+    int ok = hda_out_running ? 0 : -1;
+    pthread_mutex_unlock(&audio_mu);
+    return ok;
+}
+
+static void hda_stop_out(void *opaque) {
+    (void)opaque;
+    pthread_mutex_lock(&audio_mu);
+    if (hda_out_unit && hda_out_running) {
+        AudioOutputUnitStop(hda_out_unit);
+        hda_out_running = 0;
+    }
+    pthread_mutex_unlock(&audio_mu);
+}
+
+/* ---- HDA Capture (Microphone AudioQueueInput) ---- */
+static AudioQueueRef hda_in_queue;
+static AudioQueueBufferRef hda_in_bufs[IN_NUM_BUFFERS];
+static int hda_in_running;
+static unsigned hda_in_ch, hda_in_rate;
+
+static void hda_in_callback(void *opaque, AudioQueueRef aq, AudioQueueBufferRef buf,
+                            const AudioTimeStamp *start_time, UInt32 num_packets,
+                            const AudioStreamPacketDescription *pkt_desc) {
+    (void)start_time, (void)num_packets, (void)pkt_desc;
+    HvHda *hda = (HvHda *)opaque;
+    if (hda && buf && buf->mAudioDataByteSize > 0)
+        hv_hda_push_capture(hda, buf->mAudioData, buf->mAudioDataByteSize);
+
+    pthread_mutex_lock(&audio_mu);
+    if (hda_in_running && aq == hda_in_queue)
+        AudioQueueEnqueueBuffer(aq, buf, 0, NULL);
+    pthread_mutex_unlock(&audio_mu);
+}
+
+static void dispose_in_locked(void) {
+    if (hda_in_queue) {
+        hda_in_running = 0;
+        AudioQueueStop(hda_in_queue, true);
+        AudioQueueDispose(hda_in_queue, true);
+        hda_in_queue = NULL;
+        memset(hda_in_bufs, 0, sizeof hda_in_bufs);
+    }
+}
+
+static int hda_start_in(void *opaque, unsigned channels, unsigned rate_hz) {
+    HvHda *hda = (HvHda *)opaque;
+    if (channels < 1 || channels > 2) channels = 2;
+    if (rate_hz < 8000 || rate_hz > 192000) rate_hz = 48000;
+
+    pthread_mutex_lock(&audio_mu);
+    if (hda_in_queue && (channels != hda_in_ch || rate_hz != hda_in_rate))
+        dispose_in_locked();
+
+    if (!hda_in_queue) {
+        AudioStreamBasicDescription f = {0};
+        f.mSampleRate = (Float64)rate_hz;
+        f.mFormatID = kAudioFormatLinearPCM;
+        f.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+        f.mBytesPerPacket = f.mBytesPerFrame = 2u * channels;
+        f.mFramesPerPacket = 1;
+        f.mChannelsPerFrame = channels;
+        f.mBitsPerChannel = 16;
+
+        OSStatus st = AudioQueueNewInput(&f, hda_in_callback, hda, NULL, NULL, 0, &hda_in_queue);
+        if (st != noErr || !hda_in_queue) {
+            fprintf(stderr, "winvm: audio: microphone input unavailable (OSStatus=%d)\n", (int)st);
+            hda_in_queue = NULL;
+            pthread_mutex_unlock(&audio_mu);
+            return -1;
+        }
+        UInt32 buf_bytes = IN_BUFFER_FRAMES * f.mBytesPerFrame;
+        for (int i = 0; i < IN_NUM_BUFFERS; i++) {
+            if (AudioQueueAllocateBuffer(hda_in_queue, buf_bytes, &hda_in_bufs[i]) == noErr)
+                AudioQueueEnqueueBuffer(hda_in_queue, hda_in_bufs[i], 0, NULL);
+        }
+        hda_in_ch = channels;
+        hda_in_rate = rate_hz;
+    }
+
+    if (!hda_in_running) {
+        OSStatus st = AudioQueueStart(hda_in_queue, NULL);
+        if (st == noErr) {
+            hda_in_running = 1;
+        } else {
+            fprintf(stderr, "winvm: audio: AudioQueueStart(input) returned %d (mic permission pending?)\n", (int)st);
+            dispose_in_locked();
+        }
+    }
+    int ok = hda_in_running ? 0 : -1;
+    pthread_mutex_unlock(&audio_mu);
+    return ok;
+}
+
+static void hda_stop_in(void *opaque) {
+    (void)opaque;
+    pthread_mutex_lock(&audio_mu);
+    if (hda_in_queue && hda_in_running) {
+        hda_in_running = 0;
+        AudioQueueStop(hda_in_queue, true);
+        /* Re-prime buffers so next start is instant */
+        for (int i = 0; i < IN_NUM_BUFFERS; i++) {
+            if (hda_in_bufs[i]) AudioQueueEnqueueBuffer(hda_in_queue, hda_in_bufs[i], 0, NULL);
+        }
+    }
+    pthread_mutex_unlock(&audio_mu);
+}
+
+void hv_audio_attach_hda(HvHda *hda) {
+    if (!hda) return;
+    hda->backend = (HvHdaBackend){
+        .start_out = hda_start_out,
+        .stop_out = hda_stop_out,
+        .start_in = hda_start_in,
+        .stop_in = hda_stop_in,
+        .opaque = hda,
+    };
+}
+
+void hv_audio_shutdown(void) {
+    pthread_mutex_lock(&audio_mu);
+    if (hda_out_unit) {
+        if (hda_out_running) AudioOutputUnitStop(hda_out_unit);
+        AudioUnitUninitialize(hda_out_unit);
+        AudioComponentInstanceDispose(hda_out_unit);
+        hda_out_unit = NULL;
+        hda_out_running = 0;
+    }
+    dispose_in_locked();
+    pthread_mutex_unlock(&audio_mu);
+}
+
+/* ---- Legacy virtio-snd compatibility ---- */
+static AudioComponentInstance vsnd_unit;
+static int vsnd_running;
+static unsigned vsnd_ch, vsnd_fmt, vsnd_rate;
+
+static OSStatus vsnd_render(void *ref, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts, UInt32 bus,
+                            UInt32 frames, AudioBufferList *io) {
     (void)flags, (void)ts, (void)bus, (void)frames;
     HvVirtioSnd *d = ref;
     for (UInt32 i = 0; i < io->mNumberBuffers; i++)
@@ -27,20 +231,20 @@ static OSStatus render(void *ref, AudioUnitRenderActionFlags *flags, const Audio
     return noErr;
 }
 
-static int start(void *opaque, unsigned channels, unsigned format, unsigned rate_hz) {
+static int vsnd_start(void *opaque, unsigned channels, unsigned format, unsigned rate_hz) {
     HvVirtioSnd *d = opaque;
-    if (unit && (channels != cur_channels || format != cur_format || rate_hz != cur_rate)) {
-        AudioOutputUnitStop(unit);
-        AudioUnitUninitialize(unit);
-        AudioComponentInstanceDispose(unit);
-        unit = NULL;
-        unit_running = 0;
+    if (vsnd_unit && (channels != vsnd_ch || format != vsnd_fmt || rate_hz != vsnd_rate)) {
+        AudioOutputUnitStop(vsnd_unit);
+        AudioUnitUninitialize(vsnd_unit);
+        AudioComponentInstanceDispose(vsnd_unit);
+        vsnd_unit = NULL;
+        vsnd_running = 0;
     }
-    if (!unit) {
+    if (!vsnd_unit) {
         AudioComponentDescription desc = {kAudioUnitType_Output, HV_OUTPUT_UNIT,
                                           kAudioUnitManufacturer_Apple, 0, 0};
         AudioComponent comp = AudioComponentFindNext(NULL, &desc);
-        if (!comp || AudioComponentInstanceNew(comp, &unit) != noErr) return -1;
+        if (!comp || AudioComponentInstanceNew(comp, &vsnd_unit) != noErr) return -1;
         unsigned bytes = format == HV_VSND_FMT_S16 ? 2 : 4;
         AudioStreamBasicDescription f = {0};
         f.mSampleRate = rate_hz;
@@ -51,27 +255,26 @@ static int start(void *opaque, unsigned channels, unsigned format, unsigned rate
         f.mFramesPerPacket = 1;
         f.mChannelsPerFrame = channels;
         f.mBitsPerChannel = bytes * 8;
-        AURenderCallbackStruct cb = {render, d};
-        if (AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f) != noErr ||
-            AudioUnitSetProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) != noErr ||
-            AudioUnitInitialize(unit) != noErr) {
-            fprintf(stderr, "hengevm: sound: the output device refused %u ch, format %u, %u Hz\n", channels, format, rate_hz);
-            AudioComponentInstanceDispose(unit);
-            unit = NULL;
+        AURenderCallbackStruct cb = {vsnd_render, d};
+        if (AudioUnitSetProperty(vsnd_unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f) != noErr ||
+            AudioUnitSetProperty(vsnd_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) != noErr ||
+            AudioUnitInitialize(vsnd_unit) != noErr) {
+            AudioComponentInstanceDispose(vsnd_unit);
+            vsnd_unit = NULL;
             return -1;
         }
-        cur_channels = channels, cur_format = format, cur_rate = rate_hz;
+        vsnd_ch = channels, vsnd_fmt = format, vsnd_rate = rate_hz;
     }
-    if (!unit_running && AudioOutputUnitStart(unit) == noErr) unit_running = 1;
-    return unit_running ? 0 : -1;
+    if (!vsnd_running && AudioOutputUnitStart(vsnd_unit) == noErr) vsnd_running = 1;
+    return vsnd_running ? 0 : -1;
 }
 
-static void stop(void *opaque) {
+static void vsnd_stop(void *opaque) {
     (void)opaque;
-    if (unit && unit_running) AudioOutputUnitStop(unit); /* waits for the render callback to finish */
-    unit_running = 0;
+    if (vsnd_unit && vsnd_running) AudioOutputUnitStop(vsnd_unit);
+    vsnd_running = 0;
 }
 
 void hv_audio_attach(HvVirtioSnd *d) {
-    d->backend = (HvVirtioSndBackend){start, stop, d};
+    d->backend = (HvVirtioSndBackend){vsnd_start, vsnd_stop, d};
 }

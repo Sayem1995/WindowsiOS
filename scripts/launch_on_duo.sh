@@ -16,6 +16,13 @@ for attempt in 1 2 3 4 5; do
         --terminate-existing \
         --device "$UDID" \
         --json-output "$LAUNCH_JSON" \
+        "$BUNDLE_ID" || \
+       xcrun devicectl device process launch \
+        --no-activate \
+        --start-stopped \
+        --terminate-existing \
+        --device "$UDID" \
+        --json-output "$LAUNCH_JSON" \
         "$BUNDLE_ID"; then
         break
     fi

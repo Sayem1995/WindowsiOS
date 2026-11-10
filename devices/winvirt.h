@@ -18,6 +18,7 @@
 #include "pl011.h"
 #include "pl031.h"
 #include "pl061.h"
+#include "hda.h"
 #include "virtio_net.h"
 #include "virtio_snd.h"
 #include "xhci.h"
@@ -76,6 +77,7 @@ typedef struct HvWinVirt {
     HvNvme *nvme0;
     HvNvme *nvme1;
     HvXhci *usb;
+    HvHda *hda;
     HvVirtioSnd *snd;
 
     uint32_t ged_events;

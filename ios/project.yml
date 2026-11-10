@@ -37,6 +37,9 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
+        NSMicrophoneUsageDescription: "Windows 11 and Antigravity use your iPhone Duo microphone for live voice input and audio capture."
+        UIBackgroundModes:
+          - audio
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
@@ -82,6 +85,7 @@ targets:
           - -lresolv
           - -liconv
     dependencies:
+      - sdk: AVFoundation.framework
       - sdk: Metal.framework
       - sdk: QuartzCore.framework
       - sdk: AudioToolbox.framework

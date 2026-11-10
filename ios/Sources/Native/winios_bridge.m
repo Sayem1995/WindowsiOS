@@ -5,6 +5,7 @@
 #include "winios_jit.h"
 #include "winvm.h"
 
+#import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
@@ -87,8 +88,44 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationDidEnterBackgroundNotification object:nil];
         [nc addObserver:self selector:@selector(onAppBackgroundOrTerminate:) name:UIApplicationWillTerminateNotification object:nil];
+        [nc addObserver:self selector:@selector(onAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
     }
     return self;
+}
+
+- (void)configureAudioSessionAndMicPermission {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    AVAudioSessionCategoryOptions opts = AVAudioSessionCategoryOptionDefaultToSpeaker |
+                                         AVAudioSessionCategoryOptionAllowBluetooth |
+                                         AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+                                         AVAudioSessionCategoryOptionMixWithOthers;
+    NSError *err = nil;
+    if (![session setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeDefault options:opts error:&err]) {
+        /* Fallback to Playback if PlayAndRecord temporarily rejected before permission */
+        [session setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+    }
+    [session setPreferredSampleRate:48000.0 error:nil];
+    [session setPreferredIOBufferDuration:0.010 error:nil];
+    [session setActive:YES error:nil];
+
+    if (@available(iOS 17.0, *)) {
+        [AVAudioApplication requestRecordPermissionWithCompletionHandler:^(BOOL granted) {
+            if (granted) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    AVAudioSession *s = [AVAudioSession sharedInstance];
+                    [s setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeDefault options:opts error:nil];
+                    [s setActive:YES error:nil];
+                });
+            }
+        }];
+    }
+}
+
+- (void)onAudioInterruption:(NSNotification *)note {
+    NSNumber *typeNum = note.userInfo[AVAudioSessionInterruptionTypeKey];
+    if (typeNum && typeNum.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+    }
 }
 
 - (void)onAppBackgroundOrTerminate:(NSNotification *)note {
@@ -127,6 +164,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 - (void)installTrapGuard {
     winios_jit_install_trap_handler();
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
+    [self configureAudioSessionAndMicPermission];
     UIScreen *mainScreen = [UIScreen mainScreen];
     [self updateScreenSize:mainScreen.bounds.size scale:mainScreen.scale];
     [self notifyChanged];
@@ -326,6 +364,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)startConfiguredVMInDirectory:(NSString *)dir {
     if (_vmRunning) return;
+    [self configureAudioSessionAndMicPermission];
 
     WinIosDualMapping jit = winios_jit_mapping();
     if (!jit.rx_addr || !jit.rw_addr) {
