@@ -49,6 +49,7 @@ void hv_winvm_send_ctrl_alt_del(void);
 void hv_winvm_usb_stats(int *kbd_ready, int *tab_ready, uint64_t *delivered);
 void hv_winvm_engine_stats(uint64_t *jit_used_bytes, uint64_t *jit_cap_bytes,
                            uint64_t *jit_full_flushes, uint64_t *wfi_ticks);
+int hv_winvm_share_up(void);
 
 HvMachine *hv_winvm_machine(void);
 HvWinVirt *hv_winvm_board(void);

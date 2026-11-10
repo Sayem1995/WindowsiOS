@@ -11,6 +11,7 @@
 #include "share.h"
 #include "net_slirp.h"
 
+#include <TargetConditionals.h>
 #include <copyfile.h>
 #include <dirent.h>
 #include <errno.h>
@@ -46,19 +47,33 @@ static char *device_clip; /* the device's, for the guest */
 static unsigned long device_seq;
 static char *guest_clip; /* the guest's, until the device takes it */
 static char *guest_open_url;
+static char *last_oauth_url;
+static time_t last_oauth_seen;
 static int guest_oauth_done;
 static int url_handler_enabled = -1;
 static time_t agent_seen;
 
 static int is_url_handler_on(void) {
-    if (url_handler_enabled < 0)
+    if (url_handler_enabled < 0) {
+#if TARGET_OS_IPHONE
+        url_handler_enabled = 1;
+#else
         url_handler_enabled = getenv("HV_OAUTH_BRIDGE") != NULL ? 1 : 0;
+#endif
+    }
     return url_handler_enabled;
 }
 
 void hv_share_set_url_handler_enabled(int enabled) {
     pthread_mutex_lock(&clip_mu);
+    int prev = is_url_handler_on();
     url_handler_enabled = enabled ? 1 : 0;
+    /* If user just switched OAuth: Edge -> OAuth: Safari while an OAuth login is in flight, pop SafariSheet immediately */
+    if (!prev && url_handler_enabled && !guest_open_url && last_oauth_url &&
+        (time(NULL) - last_oauth_seen) <= 300) {
+        guest_open_url = last_oauth_url;
+        last_oauth_url = NULL;
+    }
     pthread_mutex_unlock(&clip_mu);
 }
 
@@ -717,10 +732,18 @@ static int open_url_put(Conn *c, Request *r) {
         auto_forward_localhost_ports(url);
         pthread_mutex_lock(&clip_mu);
         if (!is_url_handler_on()) {
+            if (strcasestr(url, "oauth") || strcasestr(url, "redirect_uri=")) {
+                free(last_oauth_url);
+                last_oauth_url = url;
+                last_oauth_seen = time(NULL);
+            } else {
+                free(url);
+            }
             pthread_mutex_unlock(&clip_mu);
-            free(url);
             return respond_empty(c, r, 409, "Conflict");
         }
+        free(last_oauth_url);
+        last_oauth_url = NULL;
         free(guest_open_url);
         guest_open_url = url;
         agent_seen = time(NULL);
@@ -744,6 +767,8 @@ static int serve_henge(Conn *c, Request *r) {
     if (!strcmp(what, "oauth-done") && (!strcmp(r->method, "PUT") || !strcmp(r->method, "POST"))) {
         if (body_discard(c, r) != 0) return -1;
         pthread_mutex_lock(&clip_mu);
+        free(last_oauth_url);
+        last_oauth_url = NULL;
         guest_oauth_done = 1;
         agent_seen = time(NULL);
         pthread_mutex_unlock(&clip_mu);

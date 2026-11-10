@@ -28,6 +28,7 @@ static HvWinVirt board;
 static HvDisk disk0 = {.fd = -1};
 static HvDisk disk1 = {.fd = -1};
 static int net_on;
+static int share_on;
 static _Atomic int stop_requested;
 
 static os_unfair_lock display_lock = OS_UNFAIR_LOCK_INIT;
@@ -37,6 +38,7 @@ static _Atomic(HvFbDisplay *) display_fb;
 
 static void (*exit_cb)(int reason);
 
+int hv_winvm_share_up(void) { return share_on; }
 HvMachine *hv_winvm_machine(void) { return &m; }
 HvWinVirt *hv_winvm_board(void) { return &board; }
 
@@ -188,9 +190,12 @@ int hv_winvm_create(const HvWinVmConfig *c, char *err, size_t errlen) {
     }
     hv_winvirt_reset_cpu(&board);
 
+    share_on = 0;
     if (c->share_dir && *c->share_dir && c->share_sock && *c->share_sock) {
-        if (hv_share_start(c->share_dir, c->share_sock, NULL) == 0)
+        if (hv_share_start(c->share_dir, c->share_sock, NULL) == 0) {
             hv_net_set_share_socket(c->share_sock);
+            share_on = 1;
+        }
     }
     if (board.net && !c->no_net) {
         if (hv_net_attach(&m, board.net) == 0) net_on = 1;

@@ -85,7 +85,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         _hingeStatus = 0;
         _hingeAngleDegrees = -1.0;
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        BOOL safariDefault = ([ud objectForKey:@"winios.safariOAuth"] == nil) ? YES : [ud boolForKey:@"winios.safariOAuth"];
+        BOOL safariDefault = ([ud objectForKey:@"winios.safariOAuthV2"] == nil) ? YES : [ud boolForKey:@"winios.safariOAuthV2"];
         hv_share_set_url_handler_enabled(safariDefault ? 1 : 0);
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
         _diagQueue = dispatch_queue_create("me.ammaar.windowsios.diag", attr);
@@ -395,7 +395,10 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
     NSString *sharedDir = [[self documentsPath] stringByAppendingPathComponent:@"Shared"];
     [[NSFileManager defaultManager] createDirectoryAtPath:sharedDir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *shareSock = [NSTemporaryDirectory() stringByAppendingPathComponent:@"win11_webdav.sock"];
+    /* Keep AF_UNIX sun_path well under Darwin's 104-byte limit (~82 bytes vs 106 bytes) */
+    NSString *rawTmp = [NSTemporaryDirectory() stringByReplacingOccurrencesOfString:@"/private/var/" withString:@"/var/"];
+    NSString *shareSock = [rawTmp stringByAppendingPathComponent:@"s"];
+    unlink(shareSock.fileSystemRepresentation);
 
     NSString *codePath = [dir stringByAppendingPathComponent:@"code.fd"];
     NSString *varsPath = [dir stringByAppendingPathComponent:@"vars.fd"];
@@ -549,6 +552,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         @"usb_kbd_ready: %d\n"
         @"usb_tab_ready: %d\n"
         @"usb_delivered: %llu\n"
+        @"share_up: %d\n"
+        @"oauth_safari: %d\n"
         @"hinge_status: %ld\n"
         @"hinge_angle_deg: %.1f\n"
         @"screen_pts: %.0fx%.0f @%.0fx\n",
@@ -569,6 +574,8 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
         kbdReady,
         tabReady,
         usbDelivered,
+        running ? hv_winvm_share_up() : 0,
+        hv_share_url_handler_enabled(),
         (long)hingeStatus,
         hingeDeg,
         pt.width, pt.height, scale];
@@ -658,7 +665,7 @@ static void unpack_progress_cb(uint64_t done, uint64_t total, void *opaque) {
 
 - (void)setUseSafariForGuestLinks:(BOOL)useSafariForGuestLinks {
     hv_share_set_url_handler_enabled(useSafariForGuestLinks ? 1 : 0);
-    [[NSUserDefaults standardUserDefaults] setBool:useSafariForGuestLinks forKey:@"winios.safariOAuth"];
+    [[NSUserDefaults standardUserDefaults] setBool:useSafariForGuestLinks forKey:@"winios.safariOAuthV2"];
 }
 
 - (nullable NSString *)takeGuestOpenURL {
