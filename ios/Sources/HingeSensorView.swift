@@ -164,6 +164,11 @@ final class HingeObserverViewController: UIViewController {
         guard !didInstallHinge else { return }
         didInstallHinge = true
         guard NSClassFromString("UIHingeInteraction") != nil else { return }
+        // UIHingeInteraction only exists in the iOS 27 SDK (foldable iPhone Duo).
+        // Building with an older SDK must still succeed for slab iPhones, where the
+        // hinge never reports anyway. Enable with -DWINDOWSIOS_HINGE_API when
+        // compiling against an SDK that actually declares the type.
+        #if WINDOWSIOS_HINGE_API
         if #available(iOS 27.1, *) {
             let interaction = UIHingeInteraction { [weak self] _, update in
                 guard let self else { return }
@@ -179,6 +184,7 @@ final class HingeObserverViewController: UIViewController {
             }
             view.addInteraction(interaction)
         }
+        #endif
     }
 }
 
